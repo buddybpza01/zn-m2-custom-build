@@ -1,0 +1,65 @@
+name: Build ZN-M2 Custom Firmware
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3 python3-setuptools rsync swig unzip zlib1g-dev file wget \
+            libelf-dev ecj fastjar java-properties libpython3-dev
+
+      - name: Clone OpenWrt source
+        run: |
+          git clone --depth 1 -b openwrt-25.12 https://github.com/openwrt/openwrt.git openwrt-src
+          cd openwrt-src
+          git log -1 --format='%H %ci %s'
+
+      - name: Set up feeds and OpenClash
+        run: |
+          cd openwrt-src
+          cp $GITHUB_WORKSPACE/scripts/build.sh .
+          cp -r $GITHUB_WORKSPACE/configs .
+
+      - name: Build firmware
+        run: |
+          cd openwrt-src
+          chmod +x build.sh
+          bash build.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zn-m2-firmware
+          path: |
+            openwrt-src/bin/targets/qualcommax/ipq60xx/*.ubi
+            openwrt-src/bin/targets/qualcommax/ipq60xx/*.bin
+            openwrt-src/bin/targets/qualcommax/ipq60xx/*.manifest
+          if-no-files-found: warn
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: ZN-M2 Custom Build ${{ github.run_number }}
+          files: |
+            openwrt-src/bin/targets/qualcommax/ipq60xx/*.ubi
+            openwrt-src/bin/targets/qualcommax/ipq60xx/*.bin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
