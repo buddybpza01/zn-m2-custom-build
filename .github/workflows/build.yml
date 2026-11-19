@@ -140,24 +140,28 @@ jobs:
           sed -i "s/192\.168\.[0-9]*\.[0-9]*/192.168.1.2/g" $C
           sed -i "s/hostname='.*'/hostname='ZNM2'/g" $C
 
+      - name: Add boot logging (cmdline + netconsole)
+        run: |
+          cd ./wrt/code
+          # 脚本在仓库里，避免 YAML 块标量的缩进污染 heredoc 内容
+          python3 $GITHUB_WORKSPACE/Scripts/inject-bootargs.py
+          echo "=== 确认写入结果 ==="
+          grep -rn "bootargs-append" target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ 2>/dev/null || echo "(未找到 bootargs-append)"
+
       - name: Write .config and RESOLVE
         run: |
           cd ./wrt/code
           cp $GITHUB_WORKSPACE/Config/${{ matrix.cfg }} .config
 
           # RAM 变体：在 defconfig 之前追加关 WiFi 配置
+          # 注意：不能用 heredoc！YAML 块标量会强制缩进，写进 .config 会带前导空格导致配置无效。
+          # 用 printf 逐行追加，保证行首没有空格。
           if [ "${{ matrix.patchram }}" = "1" ]; then
-            cat >> .config <<'CEOF'
-          CONFIG_PACKAGE_ath11k-firmware-ipq6018=n
-          CONFIG_PACKAGE_kmod-ath11k=n
-          CONFIG_PACKAGE_kmod-ath11k-ahb=n
-          CONFIG_PACKAGE_kmod-ath11k-pci=n
-          CONFIG_PACKAGE_wpad-openssl=n
-          CONFIG_PACKAGE_wpad-basic-mbedtls=n
-          CONFIG_PACKAGE_hostapd-common=n
-          CONFIG_PACKAGE_wireless-regdb=n
-          CEOF
+            for K in ath11k-firmware-ipq6018 kmod-ath11k kmod-ath11k-ahb kmod-ath11k-pci wpad-openssl wpad-basic-mbedtls hostapd-common wireless-regdb; do
+              printf 'CONFIG_PACKAGE_%s=n\n' "$K" >> .config
+            done
             echo "已追加 wifi 关闭配置"
+            tail -8 .config
           fi
 
           echo "=========== 输入 .config ==========="
