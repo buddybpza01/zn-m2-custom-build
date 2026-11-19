@@ -32,18 +32,18 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          # 主线：Lienol
+          # 主线：Lienol（上一轮完整产出固件）
           - name: minimal
             repo: https://github.com/Lienol/openwrt.git
             branch: 25.12
             cfg: zn_m2.config
-            patchram: 0
-          # 对照：LibWrt
+            patchram: 1
+          # 对照：LibWrt（wpad 已全部排除，避免旧 hostapd 变体）
           - name: minimal-libwrt
             repo: https://github.com/LiBwrt/LibWrt.git
             branch: 25.12-nss
             cfg: zn_m2.config
-            patchram: 0
+            patchram: 1
 
     steps:
       - name: Checkout
@@ -117,21 +117,29 @@ jobs:
         if: matrix.patchram == '1'
         run: |
           cd ./wrt/code
-          D=target/linux/qualcommax/files/arch/arm64/boot/dts/qcom
-          echo "=== 原始 q6_region (55MB) ==="
-          cat $D/ipq6018-512m.dtsi
-          # q6_region 只被 q6v5_wcss(WiFi 远程处理器) 引用。
-          # 关 WiFi 后不需要 55MB 的 WiFi 固件运行区，保守缩到 32MB（抢回 23MB）。
-          sed -i 's/reg = <0x0 0x4ab00000 0x0 0x3700000>;/reg = <0x0 0x4ab00000 0x0 0x2000000>;/' $D/ipq6018-512m.dtsi
-          echo "=== 改为 32MB ==="
-          cat $D/ipq6018-512m.dtsi
+          # 脚本按“该源码树真实存在的 DTS 文件名与 label/节点路径”自动选择写法，
+          # 选不到就 exit 1，不制造“补丁没生效但日志看起来成功”的情况。
+          python3 $GITHUB_WORKSPACE/Scripts/patch-ram.py
 
-          # 关键：不仅关 &wifi，还要关 q6v5_wcss 远程处理器本身，
-          # 否则它会按 memory-region 去申请 32MB 并把固件加载进去，
-          # 若固件实际更大就会失败 —— 显式关掉最安全。
-          printf '\n&wifi {\n\tstatus = "disabled";\n};\n\n&q6v5_wcss {\n\tstatus = "disabled";\n};\n' >> $D/ipq6000-m2.dts
-          echo "=== ipq6000-m2.dts 尾部 ==="
-          tail -14 $D/ipq6000-m2.dts
+      - name: Verify DTS source patch
+        if: matrix.patchram == '1'
+        run: |
+          cd ./wrt/code
+          D=target/linux/qualcommax/files/arch/arm64/boot/dts/qcom
+          echo "=== q6_region ==="
+          grep -n 'reg = <0x0 0x4ab00000' "$D/ipq6018-512m.dtsi"
+          grep -q '0x2000000' "$D/ipq6018-512m.dtsi" || { echo "!!! q6_region 未改成功"; exit 1; }
+          echo "=== M2 DTS 里的禁用块 ==="
+          FOUND=0
+          for f in "$D/ipq6000-m2.dts" "$D/ipq6000-zn-m2.dts"; do
+            if [ -f "$f" ] && grep -q 'ipq_m2_disable_wifi' "$f"; then
+              echo "OK: $f"
+              tail -10 "$f"
+              FOUND=1
+            fi
+          done
+          [ "$FOUND" = "1" ] || { echo "!!! 没有在任何 M2 DTS 里找到禁用块"; exit 1; }
+          echo "DTS source patch verified"
 
       - name: Patch defaults
         run: |
@@ -140,22 +148,29 @@ jobs:
           sed -i "s/192\.168\.[0-9]*\.[0-9]*/192.168.1.2/g" $C
           sed -i "s/hostname='.*'/hostname='ZNM2'/g" $C
 
-      - name: Add boot logging (cmdline + netconsole)
+      - name: Boot args untouched (deliberate)
         run: |
           cd ./wrt/code
-          # 脚本在仓库里，避免 YAML 块标量的缩进污染 heredoc 内容
-          python3 $GITHUB_WORKSPACE/Scripts/inject-bootargs.py
-          echo "=== 确认写入结果 ==="
-          grep -rn "bootargs-append" target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6000-m2.dts || echo "(未找到)"
-          echo "=== 致命校验：root= 必须存在 ==="
-          if grep -q 'bootargs-append' target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6000-m2.dts; then
-            if ! grep -q 'root=/dev/ubiblock' target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6000-m2.dts; then
-              echo "!!! 致命错误：加了 bootargs-append 但没有 root= !!!"
-              echo "!!! 内核会找不到根文件系统，刷进去必然起不来 !!!"
-              exit 1
+          D=target/linux/qualcommax/files/arch/arm64/boot/dts/qcom
+          # 故意不注入任何 bootargs。
+          # 理由：zn_m2 的 chosen/bootargs-append 由父 DTSI 提供（root=/dev/ubiblock0_1），
+          # 这是 QCA U-Boot 的约定；再写 chosen/bootargs 可能整体替换掉内核命令行，
+          # 反而丢掉 root= 和 console。上一轮已证明带 root= 的镜像仍然起不来，
+          # 所以 bootargs 不是当前瓶颈，保持原样最安全。
+          echo "=== 保持 bootargs 原样，仅打印现有值 ==="
+          grep -rn "bootargs-append" "$D" 2>/dev/null | grep -E "ipq6000-(m2|zn-m2|cmiot)" || true
+          echo "=== 确认没有额外注入 ==="
+          for f in "$D/ipq6000-m2.dts" "$D/ipq6000-zn-m2.dts"; do
+            if [ -f "$f" ]; then
+              if grep -qE 'chosen\s*\{|bootargs' "$f"; then
+                echo "!!! $f 被改过，含 chosen/bootargs —— 会覆盖父 DTSI 的 root= !!!"
+                grep -nE 'chosen\s*\{|bootargs' "$f"
+                exit 1
+              else
+                echo "OK  $f 未注入 bootargs"
+              fi
             fi
-            echo "OK: root= 已保留"
-          fi
+          done
 
       - name: Write .config and RESOLVE
         run: |
