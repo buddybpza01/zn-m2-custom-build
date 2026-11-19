@@ -138,9 +138,13 @@ jobs:
           D=target/linux/qualcommax/files/arch/arm64/boot/dts/qcom
           echo "=== 原始 q6_region (55MB) ==="
           cat $D/ipq6018-512m.dtsi
-          sed -i 's/reg = <0x0 0x4ab00000 0x0 0x3700000>;/reg = <0x0 0x4ab00000 0x0 0x1000000>;/' $D/ipq6018-512m.dtsi
-          echo "=== 改为 16MB ==="
+          # q6_region 只被 q6v5_wcss(WiFi 远程处理器) 引用。
+          # 关 WiFi 后不需要 55MB 的 WiFi 固件运行区，保守缩到 32MB（抢回 23MB），
+          # 而不是激进缩到 16MB —— 留足余量防 panic。
+          sed -i 's/reg = <0x0 0x4ab00000 0x0 0x3700000>;/reg = <0x0 0x4ab00000 0x0 0x2000000>;/' $D/ipq6018-512m.dtsi
+          echo "=== 改为 32MB ==="
           cat $D/ipq6018-512m.dtsi
+          # ipq6000-m2.dts 里原有 &wifi { status = "okay"; }，这里覆盖为 disabled
           printf '\n&wifi {\n\tstatus = "disabled";\n};\n' >> $D/ipq6000-m2.dts
           echo "=== ipq6000-m2.dts 尾部 ==="
           tail -10 $D/ipq6000-m2.dts
@@ -156,6 +160,22 @@ jobs:
         run: |
           cd ./wrt/code
           cp $GITHUB_WORKSPACE/Config/${{ matrix.cfg }} .config
+
+          # RAM 变体：在 defconfig 之前追加关 WiFi 配置
+          if [ "${{ matrix.patchram }}" = "1" ]; then
+            cat >> .config <<'CEOF'
+          CONFIG_PACKAGE_ath11k-firmware-ipq6018=n
+          CONFIG_PACKAGE_kmod-ath11k=n
+          CONFIG_PACKAGE_kmod-ath11k-ahb=n
+          CONFIG_PACKAGE_kmod-ath11k-pci=n
+          CONFIG_PACKAGE_wpad-openssl=n
+          CONFIG_PACKAGE_wpad-basic-mbedtls=n
+          CONFIG_PACKAGE_hostapd-common=n
+          CONFIG_PACKAGE_wireless-regdb=n
+          CEOF
+            echo "已追加 wifi 关闭配置"
+          fi
+
           echo "=========== 输入 .config ==========="
           cat .config
           echo "=========== 开始 make defconfig ==========="
@@ -163,8 +183,8 @@ jobs:
           echo "=========================================="
           echo "=========== 生效的目标 ==========="
           grep -E '^CONFIG_TARGET' .config
-          echo "=========== OpenClash / tun 是否生效 ==========="
-          for K in luci-app-openclash kmod-tun dnsmasq-full ip-full iptables-nft kmod-nft-tproxy ca-bundle ca-certificates luci-compat; do
+          echo "=========== 关键包是否生效 ==========="
+          for K in luci-app-openclash kmod-tun dnsmasq-full ip-full iptables-nft kmod-nft-tproxy ca-bundle ca-certificates luci-compat kmod-ath11k ath11k-firmware-ipq6018; do
             V=$(grep -E "^CONFIG_PACKAGE_${K}=" .config || echo "缺失")
             echo "  $K -> $V"
           done
