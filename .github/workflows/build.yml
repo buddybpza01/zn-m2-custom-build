@@ -139,15 +139,17 @@ jobs:
           echo "=== 原始 q6_region (55MB) ==="
           cat $D/ipq6018-512m.dtsi
           # q6_region 只被 q6v5_wcss(WiFi 远程处理器) 引用。
-          # 关 WiFi 后不需要 55MB 的 WiFi 固件运行区，保守缩到 32MB（抢回 23MB），
-          # 而不是激进缩到 16MB —— 留足余量防 panic。
+          # 关 WiFi 后不需要 55MB 的 WiFi 固件运行区，保守缩到 32MB（抢回 23MB）。
           sed -i 's/reg = <0x0 0x4ab00000 0x0 0x3700000>;/reg = <0x0 0x4ab00000 0x0 0x2000000>;/' $D/ipq6018-512m.dtsi
           echo "=== 改为 32MB ==="
           cat $D/ipq6018-512m.dtsi
-          # ipq6000-m2.dts 里原有 &wifi { status = "okay"; }，这里覆盖为 disabled
-          printf '\n&wifi {\n\tstatus = "disabled";\n};\n' >> $D/ipq6000-m2.dts
+
+          # 关键：不仅关 &wifi，还要关 q6v5_wcss 远程处理器本身，
+          # 否则它会按 memory-region 去申请 32MB 并把固件加载进去，
+          # 若固件实际更大就会失败 —— 显式关掉最安全。
+          printf '\n&wifi {\n\tstatus = "disabled";\n};\n\n&q6v5_wcss {\n\tstatus = "disabled";\n};\n' >> $D/ipq6000-m2.dts
           echo "=== ipq6000-m2.dts 尾部 ==="
-          tail -10 $D/ipq6000-m2.dts
+          tail -14 $D/ipq6000-m2.dts
 
       - name: Patch defaults
         run: |
@@ -195,8 +197,37 @@ jobs:
           FAIL=0
           grep -q 'CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_zn_m2=y' .config || { echo "!!! zn_m2 未选中 !!!"; FAIL=1; }
           grep -q 'CONFIG_TARGET_PROFILE="DEVICE_zn_m2"' .config || { echo "!!! TARGET_PROFILE 错误 !!!"; FAIL=1; }
-          if [ "$FAIL" = "1" ]; then echo "=== 所有 TARGET 项 ==="; grep -E '^CONFIG_TARGET' .config; exit 1; fi
-          echo "PASS: zn_m2"
+
+          echo "===== 检查 rust / passwall 是否真的关掉了 ====="
+          for K in rust luci-app-passwall luci-app-passwall2; do
+            if grep -qE "^CONFIG_PACKAGE_${K}=y" .config; then
+              echo "!!! ${K} 仍被启用 → 会导致 rust host 编译失败 !!!"
+              grep -E "^CONFIG_PACKAGE_${K}=" .config
+              FAIL=1
+            else
+              echo "  OK  ${K} 未启用"
+            fi
+          done
+          # passwall 的 INCLUDE_ 子项
+          if grep -qE '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_.*=y' .config; then
+            echo "!!! passwall INCLUDE 子项仍启用 !!!"
+            grep -E '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_' .config
+            FAIL=1
+          else
+            echo "  OK  passwall INCLUDE 子项全关"
+          fi
+          # rust 相关
+          if grep -qE '^CONFIG_PACKAGE_(shadowsocks-rust|sing-box|jool|openvswitch)' .config; then
+            echo "  (提示) 仍有 rust 系包:"
+            grep -E '^CONFIG_PACKAGE_(shadowsocks-rust|sing-box|jool|openvswitch)' .config || true
+          fi
+
+          if [ "$FAIL" = "1" ]; then
+            echo "===== 所有 TARGET 项 ====="
+            grep -E '^CONFIG_TARGET' .config
+            exit 1
+          fi
+          echo "PASS: 目标是 zn_m2，且 rust 已排除"
 
       - name: CHECK MODE summary
         if: inputs.MODE != 'full'
@@ -219,12 +250,24 @@ jobs:
         run: |
           cd ./wrt/code
           make download -j$(nproc) 2>&1 | tail -20
+          echo "download done"
 
       - name: Compile
         if: inputs.MODE == 'full'
         run: |
           cd ./wrt/code
-          make -j$(nproc) 2>&1 | tail -300 || (echo "=== 失败, V=s 重试 ===" && make -j1 V=s 2>&1 | tail -400)
+          set -o pipefail
+          # 注意：必须 pipefail，否则 tail 的退出码会掩盖 make 的失败
+          make -j$(nproc) 2>&1 | tail -400
+          echo "===== make 退出码: $? ====="
+
+      - name: Retry verbose on failure
+        if: failure() && inputs.MODE == 'full'
+        run: |
+          cd ./wrt/code
+          set -o pipefail
+          echo "===== 首次失败，V=s 重试定位 ====="
+          make -j1 V=s 2>&1 | tail -600
 
       - name: Report
         if: inputs.MODE == 'full'
