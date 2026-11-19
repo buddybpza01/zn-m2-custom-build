@@ -32,18 +32,12 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          # 主线：Lienol（上一轮完整产出固件）
+          # 只编 Lienol（已成功产出过完整固件的那棵树），单变体减少变量
           - name: minimal
             repo: https://github.com/Lienol/openwrt.git
             branch: 25.12
             cfg: zn_m2.config
-            patchram: 1
-          # 对照：LibWrt（wpad 已全部排除，避免旧 hostapd 变体）
-          - name: minimal-libwrt
-            repo: https://github.com/LiBwrt/LibWrt.git
-            branch: 25.12-nss
-            cfg: zn_m2.config
-            patchram: 1
+            patchram: 0
 
     steps:
       - name: Checkout
@@ -113,33 +107,19 @@ jobs:
           echo "--- 目录 ---"
           ls ./package/luci-app-openclash
 
-      - name: RAM patch
-        if: matrix.patchram == '1'
-        run: |
-          cd ./wrt/code
-          # 脚本按“该源码树真实存在的 DTS 文件名与 label/节点路径”自动选择写法，
-          # 选不到就 exit 1，不制造“补丁没生效但日志看起来成功”的情况。
-          python3 $GITHUB_WORKSPACE/Scripts/patch-ram.py
-
-      - name: Verify DTS source patch
-        if: matrix.patchram == '1'
+      - name: Memory layout record (no modification)
         run: |
           cd ./wrt/code
           D=target/linux/qualcommax/files/arch/arm64/boot/dts/qcom
-          echo "=== q6_region ==="
-          grep -n 'reg = <0x0 0x4ab00000' "$D/ipq6018-512m.dtsi"
-          grep -q '0x2000000' "$D/ipq6018-512m.dtsi" || { echo "!!! q6_region 未改成功"; exit 1; }
-          echo "=== M2 DTS 里的禁用块 ==="
-          FOUND=0
-          for f in "$D/ipq6000-m2.dts" "$D/ipq6000-zn-m2.dts"; do
-            if [ -f "$f" ] && grep -q 'ipq_m2_disable_wifi' "$f"; then
-              echo "OK: $f"
-              tail -10 "$f"
-              FOUND=1
-            fi
-          done
-          [ "$FOUND" = "1" ] || { echo "!!! 没有在任何 M2 DTS 里找到禁用块"; exit 1; }
-          echo "DTS source patch verified"
+          # 本轮不修改内存区、不修改 WiFi 节点。
+          # 已核实 Lienol 实际布局：q6_region=40MB, nss_region=8MB -> 可用约 196MB。
+          echo "=== cmiot include 链 ==="
+          grep -n '#include' "$D/ipq6000-cmiot.dtsi" || true
+          echo "=== 256m 内存区（Lienol 实际使用）==="
+          cat "$D/ipq6018-256m.dtsi" 2>/dev/null || echo "(不存在)"
+          echo "=== M2 DTS（确认 &wifi 标定仍在）==="
+          cat "$D/ipq6000-zn-m2.dts" 2>/dev/null | tail -8 || echo "(不存在)"
+          echo "本轮不修改内存区与 WiFi 节点"
 
       - name: Patch defaults
         run: |
