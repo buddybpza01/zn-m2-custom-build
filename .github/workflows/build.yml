@@ -231,45 +231,63 @@ jobs:
         if: inputs.MODE != 'full'
         run: |
           cd ./wrt/code
+          # 注意：workflow 的 shell 带 -e，grep 无匹配返回 1 会中断脚本，
+          # 所有 grep 必须加 || true
           echo "############ CHECK: ${{ matrix.name }} ############"
-          echo "内核: $(grep -oP 'KERNEL_PATCHVER:=\K[\d\.]+' target/linux/qualcommax/Makefile)"
+          echo "内核: $(grep -oP 'KERNEL_PATCHVER:=\K[\d\.]+' target/linux/qualcommax/Makefile || echo '?')"
           echo "----- 目标 ----"
-          grep -E '^CONFIG_TARGET_(qualcommax=y|qualcommax_ipq60xx=y|PROFILE|BOARD|SUBTARGET)' .config
+          grep -E '^CONFIG_TARGET_(qualcommax=y|qualcommax_ipq60xx=y|PROFILE|BOARD|SUBTARGET)' .config || true
 
           echo "----- ① WiFi 是否彻底砍掉 ----"
-          for K in kmod-ath11k kmod-ath11k-ahb kmod-ath11k-pci ath11k-firmware-ipq6018 wpad-openssl wpad-basic-mbedtls hostapd-common wireless-regdb kmod-mac80211 kmod-cfg80211 iwinfo; do
-            V=$(grep -E "^CONFIG_PACKAGE_${K}=y$" .config)
-            if [ -n "$V" ]; then echo "  !!! 仍在: $V"; else echo "  OK  $K 已砍"; fi
+          for K in kmod-ath11k kmod-ath11k-ahb kmod-ath11k-pci ath11k-firmware-ipq6018 wpad-openssl wpad-basic-mbedtls hostapd-common wireless-regdb kmod-mac80211 kmod-cfg80211; do
+            if grep -qE "^CONFIG_PACKAGE_${K}=y$" .config 2>/dev/null; then
+              echo "  !!! 仍在: $K"
+            else
+              echo "  OK  $K 已砍"
+            fi
           done
 
           echo "----- ② USB/FS 是否砍掉 ----"
-          for K in kmod-usb3 kmod-usb-core kmod-usb-dwc3 kmod-usb-xhci-hcd kmod-fs-ext4 kmod-fs-f2fs e2fsprogs f2fs-tools losetup; do
-            V=$(grep -E "^CONFIG_PACKAGE_${K}=y$" .config)
-            if [ -n "$V" ]; then echo "  !!! 仍在: $V"; else echo "  OK  $K 已砍"; fi
+          for K in kmod-usb3 kmod-usb-core kmod-usb-dwc3 kmod-usb-xhci-hcd kmod-fs-ext4 kmod-fs-f2fs e2fsprogs f2fs-tools; do
+            if grep -qE "^CONFIG_PACKAGE_${K}=y$" .config 2>/dev/null; then
+              echo "  !!! 仍在: $K"
+            else
+              echo "  OK  $K 已砍"
+            fi
           done
 
           echo "----- ③ NSS 是否完整保留 ----"
           for K in kmod-qca-nss-drv kmod-qca-nss-ecm kmod-qca-nss-dp kmod-nss-ifb kmod-qca-nss-crypto nss-firmware-ipq60xx kmod-qca-nss-drv-bridge-mgr kmod-qca-nss-drv-vlan-mgr; do
-            V=$(grep -E "^CONFIG_PACKAGE_${K}=y$" .config)
-            if [ -n "$V" ]; then echo "  OK  $V"; else echo "  !!! 缺失: $K"; fi
+            if grep -qE "^CONFIG_PACKAGE_${K}=y$" .config 2>/dev/null; then
+              echo "  OK  $K"
+            else
+              echo "  !!! 缺失: $K"
+            fi
           done
 
           echo "----- ④ OpenClash 依赖是否齐 ----"
-          for K in luci-app-openclash kmod-tun dnsmasq-full ip-full iptables-nft kmod-nft-tproxy kmod-nft-core kmod-nft-nat kmod-inet-diag kmod-nf-conntrack-netlink ca-bundle ca-certificates curl; do
-            V=$(grep -E "^CONFIG_PACKAGE_${K}=y$" .config)
-            if [ -n "$V" ]; then echo "  OK  $V"; else echo "  !!! 缺失: $K"; fi
+          for K in luci-app-openclash kmod-tun dnsmasq-full ip-full iptables-nft kmod-nft-tproxy kmod-nft-core kmod-nft-nat kmod-inet-diag kmod-nf-conntrack-netlink ca-bundle ca-certificates curl luci-mod-network uhttpd; do
+            if grep -qE "^CONFIG_PACKAGE_${K}=y$" .config 2>/dev/null; then
+              echo "  OK  $K"
+            else
+              echo "  !!! 缺失: $K"
+            fi
           done
 
-          echo "----- ⑤ 最终包清单（=y 的 PACKAGE，排除默认 lib*/内核基础）-----"
-          grep -E '^CONFIG_PACKAGE_[a-zA-Z0-9_.-]+=y$' .config \
-            | sed 's/^CONFIG_PACKAGE_//; s/=y$//' \
-            | grep -vE '^(lib|kmod-nf-|kmod-nft-|kernel|base-files|busybox|dropbear|dnsmasq|firewall|fstools|odhcp|ubox|ubus|uci|urandom|jsonfilter|jshn|netifd|procd|rpcd|swconfig|uclient|ustream|zlib|ca-bundle|terminfo|zoneinfo|openwrt-keyring|libustream)' \
-            | sort > /tmp/pkgs.txt
-          echo "总计 $(wc -l < /tmp/pkgs.txt) 个（已过滤基础库）："
-          cat /tmp/pkgs.txt
+          echo "----- ⑤ 核心组件必须在（删了系统起不来）-----"
+          for K in base-files busyless procd netifd fstools busybox uci ubus; do
+            if grep -qE "^CONFIG_PACKAGE_${K}=y$" .config 2>/dev/null; then
+              echo "  OK  $K"
+            fi
+          done
 
-          echo "----- ⑥ 包总数（不过滤）-----"
-          echo "  CONFIG_PACKAGE_*=y 总数: $(grep -cE '^CONFIG_PACKAGE_[a-zA-Z0-9_.-]+=y$' .config)"
+          echo "----- ⑥ 最终包清单 -----"
+          grep -E '^CONFIG_PACKAGE_[a-zA-Z0-9_.-]+=y$' .config \
+            | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort > /tmp/pkgs.txt || true
+          echo "全部 CONFIG_PACKAGE_*=y 数量: $(wc -l < /tmp/pkgs.txt)"
+          echo ""
+          echo ">>> 按字母序的完整清单 <<<"
+          cat /tmp/pkgs.txt
           echo "####################################################"
 
       - name: Download pkgs
