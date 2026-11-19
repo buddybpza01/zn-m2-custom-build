@@ -32,16 +32,16 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          # 主线：LibWrt（与已实测能启动的 OlaveV 固件同源，kernel 6.12.116）
+          # 主线：Lienol（上一轮唯一编成功的，hostapd 版本新）
           - name: minimal
-            repo: https://github.com/LiBwrt/LibWrt.git
-            branch: 25.12-nss
-            cfg: zn_m2.config
-            patchram: 1
-          # 退路：Lienol 上游（同为 6.12，交叉验证）
-          - name: minimal-lienol
             repo: https://github.com/Lienol/openwrt.git
             branch: 25.12
+            cfg: zn_m2.config
+            patchram: 1
+          # 对照：LibWrt（验证砍了 wpad 后 hostapd bug 是否绕开）
+          - name: minimal-libwrt
+            repo: https://github.com/LiBwrt/LibWrt.git
+            branch: 25.12-nss
             cfg: zn_m2.config
             patchram: 1
 
