@@ -224,12 +224,34 @@ jobs:
             echo "  OK  无 rust 系包启用"
           fi
 
+          echo "--- 5) ★ RUBY_ENABLE_YJIT 必须关闭（真凶）★ ---"
+          # ruby 的 PKG_BUILD_DEPENDS:=ruby/host RUBY_ENABLE_YJIT:rust/host
+          # 而 Config.in 里 default y if x86_64||aarch64，我们是 aarch64
+          # 结果 rust/host 去下载 LLVM 失败 → 整个编译崩
+          YJIT=$(grep -E '^CONFIG_RUBY_ENABLE_YJIT=y' .config || true)
+          if [ -n "$YJIT" ]; then
+            echo "  !!! CONFIG_RUBY_ENABLE_YJIT=y → 会编译 rust/host → 必然失败 !!!"
+            echo "  分析：luci-app-openclash DEPENDS 含 +ruby，ruby 在 aarch64 上默认开 YJIT"
+            FAIL=1
+          else
+            echo "  OK  RUBY_ENABLE_YJIT 未启用"
+          fi
+
+          echo "--- 6) ruby 是否被装（openclash 需要它）---"
+          if grep -qE '^CONFIG_PACKAGE_ruby=y' .config; then
+            echo "  OK  ruby 已启用（openclash 依赖）"
+          else
+            echo "  (提示) ruby 未启用，openclash 的 LuCI 界面可能残缺"
+          fi
+
           if [ "$FAIL" = "1" ]; then
             echo "===== 所有 TARGET 项 ====="
             grep -E '^CONFIG_TARGET' .config
+            echo "===== ruby/rust 相关配置 ====="
+            grep -E 'RUBY|RUST|rust' .config || true
             exit 1
           fi
-          echo "PASS: 目标是 zn_m2，rust 已排除"
+          echo "PASS: 目标是 zn_m2，rust 已排除，YJIT 已关"
 
       - name: CHECK MODE summary
         if: inputs.MODE != 'full'
