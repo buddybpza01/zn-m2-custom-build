@@ -32,18 +32,18 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          # 主线：Lienol（上一轮唯一编成功的，hostapd 版本新）
+          # 主线：Lienol
           - name: minimal
             repo: https://github.com/Lienol/openwrt.git
             branch: 25.12
             cfg: zn_m2.config
-            patchram: 1
-          # 对照：LibWrt（验证砍了 wpad 后 hostapd bug 是否绕开）
+            patchram: 0
+          # 对照：LibWrt
           - name: minimal-libwrt
             repo: https://github.com/LiBwrt/LibWrt.git
             branch: 25.12-nss
             cfg: zn_m2.config
-            patchram: 1
+            patchram: 0
 
     steps:
       - name: Checkout
@@ -146,7 +146,16 @@ jobs:
           # 脚本在仓库里，避免 YAML 块标量的缩进污染 heredoc 内容
           python3 $GITHUB_WORKSPACE/Scripts/inject-bootargs.py
           echo "=== 确认写入结果 ==="
-          grep -rn "bootargs-append" target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ 2>/dev/null || echo "(未找到 bootargs-append)"
+          grep -rn "bootargs-append" target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6000-m2.dts || echo "(未找到)"
+          echo "=== 致命校验：root= 必须存在 ==="
+          if grep -q 'bootargs-append' target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6000-m2.dts; then
+            if ! grep -q 'root=/dev/ubiblock' target/linux/qualcommax/files/arch/arm64/boot/dts/qcom/ipq6000-m2.dts; then
+              echo "!!! 致命错误：加了 bootargs-append 但没有 root= !!!"
+              echo "!!! 内核会找不到根文件系统，刷进去必然起不来 !!!"
+              exit 1
+            fi
+            echo "OK: root= 已保留"
+          fi
 
       - name: Write .config and RESOLVE
         run: |
