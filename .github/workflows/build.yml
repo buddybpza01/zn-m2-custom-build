@@ -141,12 +141,7 @@ jobs:
           sed -i 's/reg = <0x0 0x4ab00000 0x0 0x3700000>;/reg = <0x0 0x4ab00000 0x0 0x1000000>;/' $D/ipq6018-512m.dtsi
           echo "=== 改为 16MB ==="
           cat $D/ipq6018-512m.dtsi
-          cat >> $D/ipq6000-m2.dts <<'EOF'
-
-&wifi {
-	status = "disabled";
-};
-EOF
+          printf '\n&wifi {\n\tstatus = "disabled";\n};\n' >> $D/ipq6000-m2.dts
           echo "=== ipq6000-m2.dts 尾部 ==="
           tail -10 $D/ipq6000-m2.dts
 
