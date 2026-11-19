@@ -1,0 +1,17 @@
+name: T2
+on:
+  workflow_dispatch:
+    inputs:
+      MODE:
+        description: 'x'
+        default: 'check'
+        required: true
+        type: choice
+        options:
+          - check
+          - full
+jobs:
+  a:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: echo ${{ inputs.MODE }}
