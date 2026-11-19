@@ -1,37 +1,254 @@
-name: Build ZN-M2 Custom
+name: Build ZN-M2 LibWrt
 
 on:
   workflow_dispatch:
     inputs:
-      TEST:
-        description: '仅输出配置不编译'
-        default: 'false'
+      MODE:
+        description: 'check=只验证配置不编译 / full=完整编译'
+        default: 'check'
+        required: true
+        type: choice
+        options:
+          - check
+          - full
+      ONLY:
+        description: '只跑某个变体(留空=全部)'
+        default: ''
         required: false
-        type: boolean
-
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - 'MODE_TRIGGER'
 permissions: write-all
 
 jobs:
-  config:
-    name: IPQ60XX-CUSTOM
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 340
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
-        CONFIG: [IPQ60XX-CUSTOM]
-        SOURCE: [VIKINGYFY/immortalwrt]
-        BRANCH: [owrt]
+        include:
+          - name: libwrt
+            repo: https://github.com/LiBwrt/LibWrt.git
+            branch: 25.12-nss
+            cfg: zn_m2.config
+            patchram: 0
+          - name: libwrt-ram
+            repo: https://github.com/LiBwrt/LibWrt.git
+            branch: 25.12-nss
+            cfg: zn_m2.config
+            patchram: 1
+          - name: lienol
+            repo: https://github.com/Lienol/openwrt.git
+            branch: 25.12
+            cfg: zn_m2.config
+            patchram: 0
+          - name: lienol-ram
+            repo: https://github.com/Lienol/openwrt.git
+            branch: 25.12
+            cfg: zn_m2.config
+            patchram: 1
+          - name: laipeng
+            repo: https://github.com/laipeng668/openwrt-6.x.git
+            branch: 25.12-nss
+            cfg: zn_m2.config
+            patchram: 0
+          - name: minimal
+            repo: https://github.com/LiBwrt/LibWrt.git
+            branch: 25.12-nss
+            cfg: zn_m2-min.config
+            patchram: 1
 
-    uses: ./.github/workflows/WRT-CORE.yml
-    with:
-      WRT_CONFIG: ${{matrix.CONFIG}}
-      WRT_THEME: argon
-      WRT_NAME: ZNM2
-      WRT_SSID: ZNM2
-      WRT_WORD: 12345678
-      WRT_IP: 192.168.1.1
-      WRT_PW: 无
-      WRT_REPO: https://github.com/${{matrix.SOURCE}}.git
-      WRT_BRANCH: ${{matrix.BRANCH}}
-      WRT_SOURCE: ${{matrix.SOURCE}}
-      WRT_PACKAGE: ''
-      WRT_TEST: ${{inputs.TEST || 'false'}}
+    steps:
+      - name: Skip filtered
+        if: inputs.ONLY != '' && inputs.ONLY != matrix.name
+        run: |
+          echo "跳过 ${{ matrix.name }} (ONLY=${{ inputs.ONLY }})"
+          exit 0
+
+      - name: Show runner
+        run: |
+          echo "runner=$RUNNER_NAME cores=$(nproc) mode=${{ inputs.MODE }} variant=${{ matrix.name }}"
+          nproc; df -h /
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Init
+        run: |
+          echo "BUILD_DATE=$(TZ=UTC-8 date +'%y.%m.%d-%H.%M')" >> $GITHUB_ENV
+
+      - name: Install deps
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -yqq update
+          sudo -E apt-get -yqq install build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget \
+            dos2unix python3-netifaces libfuse-dev ccache time
+          sudo timedatectl set-timezone "Asia/Shanghai"
+
+      - name: Prepare build dir
+        run: |
+          sudo mkdir -p /mnt/build_wrt
+          sudo chown $USER:$USER /mnt/build_wrt
+          ln -sfn /mnt/build_wrt ./wrt
+
+      - name: Clone source
+        run: |
+          git clone --depth=1 --single-branch --branch "${{ matrix.branch }}" "${{ matrix.repo }}" ./wrt/code
+          cd ./wrt/code
+          echo "SRC_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
+          echo "内核声明: $(grep -oP 'KERNEL_PATCHVER:=\K[\d\.]+' target/linux/qualcommax/Makefile || echo 未知)"
+          echo "zn_m2 设备定义数: $(grep -c 'Device/zn_m2' target/linux/qualcommax/image/ipq60xx.mk || echo 0)"
+
+      - name: Update feeds
+        run: |
+          cd ./wrt/code
+          ./scripts/feeds update -a 2>&1 | tail -20
+          ./scripts/feeds install -a 2>&1 | tail -20
+
+      - name: Add OpenClash
+        run: |
+          cd ./wrt/code
+          git clone --depth=1 --branch dev https://github.com/vernesong/OpenClash.git /tmp/oc
+          cp -r /tmp/oc/luci-app-openclash ./package/luci-app-openclash
+          echo "--- Makefile 头部 ---"
+          head -20 ./package/luci-app-openclash/Makefile
+          echo "--- 目录 ---"
+          ls ./package/luci-app-openclash
+
+      - name: RAM patch
+        if: matrix.patchram == '1'
+        run: |
+          cd ./wrt/code
+          D=target/linux/qualcommax/files/arch/arm64/boot/dts/qcom
+          echo "=== 原始 q6_region (55MB) ==="
+          cat $D/ipq6018-512m.dtsi
+          sed -i 's/reg = <0x0 0x4ab00000 0x0 0x3700000>;/reg = <0x0 0x4ab00000 0x0 0x1000000>;/' $D/ipq6018-512m.dtsi
+          echo "=== 改为 16MB ==="
+          cat $D/ipq6018-512m.dtsi
+          cat >> $D/ipq6000-m2.dts <<'EOF'
+
+&wifi {
+	status = "disabled";
+};
+EOF
+          echo "=== ipq6000-m2.dts 尾部 ==="
+          tail -10 $D/ipq6000-m2.dts
+
+      - name: Patch defaults
+        run: |
+          cd ./wrt/code
+          C=./package/base-files/files/bin/config_generate
+          sed -i "s/192\.168\.[0-9]*\.[0-9]*/192.168.1.2/g" $C
+          sed -i "s/hostname='.*'/hostname='ZNM2'/g" $C
+
+      - name: Write .config and RESOLVE
+        run: |
+          cd ./wrt/code
+          cp $GITHUB_WORKSPACE/Config/${{ matrix.cfg }} .config
+          echo "=========== 输入 .config ==========="
+          cat .config
+          echo "=========== 开始 make defconfig ==========="
+          make defconfig 2>&1 | tail -60
+          echo "=========================================="
+          echo "=========== 生效的目标 ==========="
+          grep -E '^CONFIG_TARGET' .config
+          echo "=========== OpenClash / tun 是否生效 ==========="
+          for K in luci-app-openclash kmod-tun dnsmasq-full ip-full iptables-nft kmod-nft-tproxy ca-bundle ca-certificates luci-compat; do
+            V=$(grep -E "^CONFIG_PACKAGE_${K}=" .config || echo "缺失")
+            echo "  $K -> $V"
+          done
+
+      - name: Sanity check
+        run: |
+          cd ./wrt/code
+          FAIL=0
+          grep -q 'CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_zn_m2=y' .config || { echo "!!! zn_m2 未选中 !!!"; FAIL=1; }
+          grep -q 'CONFIG_TARGET_PROFILE="DEVICE_zn_m2"' .config || { echo "!!! TARGET_PROFILE 错误 !!!"; FAIL=1; }
+          if [ "$FAIL" = "1" ]; then echo "=== 所有 TARGET 项 ==="; grep -E '^CONFIG_TARGET' .config; exit 1; fi
+          echo "PASS: zn_m2"
+
+      - name: CHECK MODE summary
+        if: inputs.MODE != 'full'
+        run: |
+          cd ./wrt/code
+          echo "############ CHECK 结果: ${{ matrix.name }} ############"
+          echo "内核: $(grep -oP 'KERNEL_PATCHVER:=\K[\d\.]+' target/linux/qualcommax/Makefile)"
+          echo "----- 目标 ----"
+          grep -E '^CONFIG_TARGET' .config
+          echo "----- 关键包 ----"
+          for K in luci luci-base luci-compat luci-app-openclash luci-app-firewall luci-app-package-manager luci-theme-bootstrap kmod-tun dnsmasq-full ip-full iptables-nft kmod-nft-tproxy ca-bundle ca-certificates kmod-inet-diag kmod-nf-conntrack-netlink; do
+            printf "%-32s %s\n" "$K" "$(grep -E "^CONFIG_PACKAGE_${K}=" .config || echo '##### 不存在 #####')"
+          done
+          echo "----- 可用 luci-app 列表(前60) ----"
+          ./scripts/feeds list -s 2>/dev/null | grep -E '^luci-app' | head -60 || true
+          echo "####################################################"
+
+      - name: Download pkgs
+        if: inputs.MODE == 'full'
+        run: |
+          cd ./wrt/code
+          make download -j$(nproc) 2>&1 | tail -20
+
+      - name: Compile
+        if: inputs.MODE == 'full'
+        run: |
+          cd ./wrt/code
+          make -j$(nproc) 2>&1 | tail -300 || (echo "=== 失败, V=s 重试 ===" && make -j1 V=s 2>&1 | tail -400)
+
+      - name: Report
+        if: inputs.MODE == 'full'
+        run: |
+          cd ./wrt/code
+          echo "==== 产物 ===="
+          find ./bin/targets/ -type f \( -name "*.ubi" -o -name "*.bin" -o -name "*.itb" \) -printf "%10s  %f\n" 2>/dev/null || echo "(无)"
+          echo "==== 内核 ===="
+          find ./bin/targets/ -name "*.manifest" -exec grep -oP '^kernel - \K[\d\.]+' {} \; 2>/dev/null || echo "(无)"
+          KVER=$(find ./bin/targets/ -name "*.manifest" -exec grep -oP '^kernel - \K[\d\.]+' {} \; 2>/dev/null | head -1)
+          echo "KVER=$KVER" >> $GITHUB_ENV
+          echo "==== 关键包 ===="
+          find ./bin/targets/ -name "*.manifest" -exec grep -E 'luci-app-openclash|kmod-tun|^kernel' {} \; 2>/dev/null || true
+
+      - name: Collect
+        if: inputs.MODE == 'full'
+        run: |
+          cd ./wrt/code
+          mkdir -p ./upload
+          find ./bin/targets/ -type f \( -name "*zn_m2*" -o -name "*.manifest" \) -exec cp -f {} ./upload/ \; 2>/dev/null || true
+          cp -f .config ./upload/config.txt 2>/dev/null || true
+          ls -la ./upload/
+
+      - name: Upload artifact
+        if: inputs.MODE == 'full'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-${{ env.BUILD_DATE }}
+          path: ./wrt/code/upload/
+          retention-days: 30
+
+      - name: Release
+        if: inputs.MODE == 'full' && env.KVER != ''
+        uses: softprops/action-gh-release@master
+        with:
+          tag_name: ${{ matrix.name }}-${{ env.BUILD_DATE }}
+          files: ./wrt/code/upload/*
+          body: |
+            兆能 ZN-M2 变体 ${{ matrix.name }}
+            源码 ${{ matrix.repo }} @ ${{ matrix.branch }} (${{ env.SRC_HASH }})
+            内核 ${{ env.KVER }}
+            LAN 192.168.1.2
