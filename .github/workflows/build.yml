@@ -198,28 +198,44 @@ jobs:
           grep -q 'CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_zn_m2=y' .config || { echo "!!! zn_m2 未选中 !!!"; FAIL=1; }
           grep -q 'CONFIG_TARGET_PROFILE="DEVICE_zn_m2"' .config || { echo "!!! TARGET_PROFILE 错误 !!!"; FAIL=1; }
 
-          echo "===== 检查 rust / passwall 是否真的关掉了 ====="
-          for K in rust luci-app-passwall luci-app-passwall2; do
+          echo "===== rust 依赖检查 ====="
+          echo "--- 1) rust 包本身 ---"
+          if grep -qE '^CONFIG_PACKAGE_rust=y' .config; then
+            echo "!!! rust 被启用 → 必然编译失败 !!!"; FAIL=1
+          else
+            echo "  OK  rust 未启用"
+          fi
+
+          echo "--- 2) passwall 主包 ---"
+          PW_ON=0
+          for K in luci-app-passwall luci-app-passwall2; do
             if grep -qE "^CONFIG_PACKAGE_${K}=y" .config; then
-              echo "!!! ${K} 仍被启用 → 会导致 rust host 编译失败 !!!"
-              grep -E "^CONFIG_PACKAGE_${K}=" .config
-              FAIL=1
+              echo "  !!! ${K} 被启用"; PW_ON=1; FAIL=1
             else
               echo "  OK  ${K} 未启用"
             fi
           done
-          # passwall 的 INCLUDE_ 子项
-          if grep -qE '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_.*=y' .config; then
-            echo "!!! passwall INCLUDE 子项仍启用 !!!"
-            grep -E '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_' .config
-            FAIL=1
+
+          echo "--- 3) passwall INCLUDE 子项 ---"
+          INC=$(grep -E '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_.*=y' .config || true)
+          if [ -n "$INC" ]; then
+            echo "$INC" | sed 's/^/     /'
+            if [ "$PW_ON" = "1" ]; then
+              echo "  !!! passwall 主包已启用且 INCLUDE 残留 → rust 会被拉起"; FAIL=1
+            else
+              echo "  (警告) 有 INCLUDE 残留，但 passwall 主包未启用，rust 不会被编译 —— 不阻断"
+            fi
           else
             echo "  OK  passwall INCLUDE 子项全关"
           fi
-          # rust 相关
-          if grep -qE '^CONFIG_PACKAGE_(shadowsocks-rust|sing-box|jool|openvswitch)' .config; then
-            echo "  (提示) 仍有 rust 系包:"
-            grep -E '^CONFIG_PACKAGE_(shadowsocks-rust|sing-box|jool|openvswitch)' .config || true
+
+          echo "--- 4) 其它 rust 系包 ---"
+          OTH=$(grep -E '^CONFIG_PACKAGE_(shadowsocks-rust|sing-box|jool|openvswitch|rustdesk)' .config | grep '=y' || true)
+          if [ -n "$OTH" ]; then
+            echo "$OTH" | sed 's/^/     /'
+            echo "  (警告) 这些包会拉 rust，若编译失败请改配置"
+          else
+            echo "  OK  无 rust 系包启用"
           fi
 
           if [ "$FAIL" = "1" ]; then
@@ -227,7 +243,7 @@ jobs:
             grep -E '^CONFIG_TARGET' .config
             exit 1
           fi
-          echo "PASS: 目标是 zn_m2，且 rust 已排除"
+          echo "PASS: 目标是 zn_m2，rust 已排除"
 
       - name: CHECK MODE summary
         if: inputs.MODE != 'full'
